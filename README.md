@@ -58,12 +58,34 @@ After installation, double-tap the **Control** key to start dictating. Speak nat
 
 The menu bar icon shows the current state: 🎙 idle, ⏺ recording, ⏳ transcribing.
 
-### Grant permissions
+### Post-install: grant permissions
 
-On first run, macOS will ask you to grant two permissions in **System Settings > Privacy & Security**:
+Escriba needs two macOS permissions to function. **It will crash silently without these.** You must grant them manually after the first install:
 
-- **Accessibility** — needed to detect the hotkey and type text at your cursor
-- **Microphone** — needed to record audio
+1. Open **System Settings > Privacy & Security > Accessibility**
+2. Click the **+** button, navigate to `/Applications/Escriba.app` (or `~/.local/bin/whisper-dictation`), and add it
+3. Open **System Settings > Privacy & Security > Microphone**
+4. Toggle on **Escriba** (it should appear automatically after the first launch attempt)
+
+Then restart the daemon:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.whisper-dictation.agent
+```
+
+### Verifying it's running
+
+Check the menu bar for the 🎙 icon. If it's not there, check the logs:
+
+```bash
+# Startup and runtime logs
+cat ~/.local/share/whisper-dictation/stderr.log
+
+# Is the daemon running?
+launchctl print gui/$(id -u)/com.whisper-dictation.agent | grep "state ="
+```
+
+If you see `successive crashes`, the logs will tell you why. Common causes: missing Accessibility permission, or missing model file.
 
 ## Configuration
 

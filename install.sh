@@ -145,9 +145,24 @@ swift build -c release \
     -Xlinker "-rpath" -Xlinker "${WHISPER_LIB}" \
     2>&1 | tail -5
 
-# Copy binary
+# Copy binary and co-locate libwhisper so it's found at runtime.
+# macOS SIP strips DYLD_LIBRARY_PATH from launchd agents, so we can't
+# rely on environment variables. Instead we copy the dylib next to the
+# binary and rewrite the rpath to @executable_path.
 cp "$(swift build -c release --show-bin-path)/WhisperDictation" "${BIN_DIR}/whisper-dictation"
-ok "Binary installed to ${BIN_DIR}/whisper-dictation"
+
+# Copy libwhisper dylib next to binary
+WHISPER_DYLIB=$(find "${WHISPER_LIB}" -name 'libwhisper*.dylib' -not -name '*compat*' | head -1)
+if [[ -n "${WHISPER_DYLIB}" ]]; then
+    cp "${WHISPER_DYLIB}" "${BIN_DIR}/"
+    DYLIB_NAME=$(basename "${WHISPER_DYLIB}")
+    # Rewrite the binary's rpath to look next to itself
+    install_name_tool -add_rpath @executable_path "${BIN_DIR}/whisper-dictation" 2>/dev/null || true
+    ok "Binary + libwhisper installed to ${BIN_DIR}/"
+else
+    warn "Could not find libwhisper dylib — binary may fail at runtime"
+    ok "Binary installed to ${BIN_DIR}/whisper-dictation"
+fi
 
 # ── Create .app bundle for Spotlight / Raycast visibility ─────
 
@@ -248,11 +263,6 @@ cat > "${PLIST_PATH}" <<PLIST
     <string>${INSTALL_DIR}/stdout.log</string>
     <key>StandardErrorPath</key>
     <string>${INSTALL_DIR}/stderr.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>DYLD_LIBRARY_PATH</key>
-        <string>${WHISPER_LIB}</string>
-    </dict>
 </dict>
 </plist>
 PLIST

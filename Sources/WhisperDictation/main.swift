@@ -1,10 +1,27 @@
 import AppKit
 import Foundation
-import UserNotifications
+import os.log
+
+// ── Logging ──────────────────────────────────────────────────
+
+let log = OSLog(subsystem: "com.whisper-dictation.escriba", category: "main")
+
+func logInfo(_ msg: String) {
+    os_log(.info, log: log, "%{public}@", msg)
+    fputs("[\(ISO8601DateFormatter().string(from: Date()))] \(msg)\n", stderr)
+}
+
+func logError(_ msg: String) {
+    os_log(.error, log: log, "%{public}@", msg)
+    fputs("[\(ISO8601DateFormatter().string(from: Date()))] ERROR: \(msg)\n", stderr)
+}
 
 // ── Entry point ──────────────────────────────────────────────
 
+logInfo("Escriba starting...")
+
 let config = Config.load()
+logInfo("Config loaded: model=\(config.model), language=\(config.language)")
 
 // ── Status icon in menu bar ──────────────────────────────────
 
@@ -18,6 +35,8 @@ let menu = NSMenu()
 let quitItem = NSMenuItem(title: "Quit Escriba", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 menu.addItem(quitItem)
 statusItem.menu = menu
+
+logInfo("Menu bar icon created")
 
 // ── Thread-safe state machine ────────────────────────────────
 
@@ -43,22 +62,6 @@ func setStatus(_ emoji: String) {
     }
 }
 
-// ── Notifications (UserNotifications framework, macOS 14+) ───
-
-func requestNotificationPermission() {
-    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-}
-
-func notify(_ message: String) {
-    let content = UNMutableNotificationContent()
-    content.title = "Escriba"
-    content.body = message
-    let request = UNNotificationRequest(
-        identifier: UUID().uuidString, content: content,
-        trigger: nil)
-    UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
-}
-
 func playSound() {
     if config.notifySound {
         NSSound(named: "Tink")?.play()
@@ -67,14 +70,14 @@ func playSound() {
 
 // ── Initialize transcriber (loads model once at startup) ─────
 
-requestNotificationPermission()
+logInfo("Loading whisper model: \(config.modelPath.path)")
 
 do {
     transcriber = try Transcriber(config: config)
-    print("✓ Whisper model loaded: \(config.model)")
+    logInfo("Whisper model loaded successfully")
 } catch {
-    print("✗ Failed to load Whisper model: \(error)")
-    print("  Run install.sh to download the model.")
+    logError("Failed to load Whisper model: \(error)")
+    logError("Run install.sh to download the model.")
     exit(1)
 }
 
@@ -86,6 +89,7 @@ func startRecording() {
     guard state == .idle else { return }
     state = .recording
     setStatus("⏺")
+    logInfo("Recording started")
 
     let rec = AudioRecorder(config: config)
     recorder = rec
@@ -94,6 +98,7 @@ func startRecording() {
         guard let url = audioURL else {
             state = .idle
             setStatus("🎙")
+            logInfo("Recording cancelled (no audio)")
             return
         }
         transcribe(audioURL: url)
@@ -102,7 +107,7 @@ func startRecording() {
     do {
         try rec.start()
     } catch {
-        print("✗ Failed to start recording: \(error)")
+        logError("Failed to start recording: \(error)")
         state = .idle
         setStatus("🎙")
     }
@@ -110,6 +115,7 @@ func startRecording() {
 
 func stopRecording() {
     guard state == .recording else { return }
+    logInfo("Recording stopped by user")
     recorder?.stop()
     recorder = nil
 }
@@ -117,6 +123,7 @@ func stopRecording() {
 func transcribe(audioURL: URL) {
     state = .transcribing
     setStatus("⏳")
+    logInfo("Transcribing...")
 
     DispatchQueue.global(qos: .userInitiated).async {
         defer {
@@ -132,22 +139,20 @@ func transcribe(audioURL: URL) {
             var text = try t.transcribe(audioURL: audioURL)
 
             if text.isEmpty {
-                DispatchQueue.main.async { notify("Nothing recognized.") }
+                logInfo("Transcription returned empty result")
                 return
             }
 
             // Post-process
             text = textCleaner.clean(text)
+            logInfo("Transcription complete: \(text.prefix(80))...")
 
             DispatchQueue.main.async {
                 TextInjector.type(text)
                 playSound()
             }
         } catch {
-            print("✗ Transcription error: \(error)")
-            DispatchQueue.main.async {
-                notify("Transcription failed.")
-            }
+            logError("Transcription error: \(error)")
         }
     }
 }
@@ -168,17 +173,18 @@ hotkey.onDoubleTap = {
 
 do {
     try hotkey.start()
-    print("✓ Listening for double-tap Control")
-    print("  Double-tap Control to start/stop dictation")
-    print("  Language: \(config.language)")
+    logInfo("Hotkey listener active — double-tap Control to dictate")
+    logInfo("Language: \(config.language)")
     if config.enableLLMCleanup {
-        print("  LLM cleanup: ON (\(config.llmCleanupModel))")
+        logInfo("LLM cleanup: ON (\(config.llmCleanupModel))")
     }
 } catch {
-    print("✗ \(error)")
-    print("  Grant Accessibility permission and restart.")
+    logError("\(error)")
+    logError("Grant Accessibility permission in System Settings > Privacy & Security > Accessibility")
     exit(1)
 }
+
+logInfo("Escriba ready")
 
 // ── Run forever ──────────────────────────────────────────────
 
