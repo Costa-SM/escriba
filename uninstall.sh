@@ -35,6 +35,11 @@ info "Removing binary..."
 rm -f "${BIN}"
 ok "Binary removed"
 
+# Remove .app bundle
+info "Removing Escriba.app..."
+rm -rf "/Applications/Escriba.app"
+ok "App bundle removed"
+
 # Remove install directory (whisper.cpp, llama.cpp, models, logs)
 info "Removing ${INSTALL_DIR} ..."
 rm -rf "${INSTALL_DIR}"

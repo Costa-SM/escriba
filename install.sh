@@ -149,6 +149,55 @@ swift build -c release \
 cp "$(swift build -c release --show-bin-path)/WhisperDictation" "${BIN_DIR}/whisper-dictation"
 ok "Binary installed to ${BIN_DIR}/whisper-dictation"
 
+# ── Create .app bundle for Spotlight / Raycast visibility ─────
+
+APP_DIR="/Applications/Escriba.app"
+APP_CONTENTS="${APP_DIR}/Contents"
+APP_MACOS="${APP_CONTENTS}/MacOS"
+
+info "Creating Escriba.app bundle..."
+mkdir -p "${APP_MACOS}"
+
+# Launcher script that execs the real binary
+cat > "${APP_MACOS}/Escriba" <<'LAUNCHER'
+#!/bin/bash
+exec "$HOME/.local/bin/whisper-dictation"
+LAUNCHER
+chmod +x "${APP_MACOS}/Escriba"
+
+# Info.plist
+cat > "${APP_CONTENTS}/Info.plist" <<'INFOPLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>Escriba</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.whisper-dictation.escriba</string>
+    <key>CFBundleName</key>
+    <string>Escriba</string>
+    <key>CFBundleDisplayName</key>
+    <string>Escriba</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Escriba needs microphone access to transcribe your speech.</string>
+</dict>
+</plist>
+INFOPLIST
+
+ok "Escriba.app created in /Applications"
+
 # ── Write default config if none exists ───────────────────────
 
 CONFIG_FILE="${CONFIG_DIR}/config.json"
@@ -219,6 +268,7 @@ ok "launchd agent installed and started"
 echo ""
 echo -e "${GREEN}━━━ Installation complete ━━━${NC}"
 echo ""
+echo "  App:     /Applications/Escriba.app"
 echo "  Binary:  ${BIN_DIR}/whisper-dictation"
 echo "  Config:  ${CONFIG_FILE}"
 echo "  Model:   ${MODEL_FILE}"
@@ -228,7 +278,7 @@ echo "  Double-tap Control to start/stop dictation."
 echo ""
 echo -e "${YELLOW}Important:${NC} Grant Accessibility permission:"
 echo "  System Settings → Privacy & Security → Accessibility"
-echo "  Add: ${BIN_DIR}/whisper-dictation"
+echo "  Add: /Applications/Escriba.app (or ${BIN_DIR}/whisper-dictation)"
 echo ""
 if ! $WITH_LLM; then
     echo "  To enable LLM text cleanup, re-run: ./install.sh --with-llm"
