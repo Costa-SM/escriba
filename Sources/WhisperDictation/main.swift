@@ -140,7 +140,7 @@ let textCleaner = TextCleaner(config: config)
 func startRecording() {
     guard state == .idle else { return }
     state = .recording
-    startAnimation(["⏺", "🔴"])
+    setStatus("🔴")
     playStartSound()
     logInfo("Recording started")
 
@@ -149,7 +149,6 @@ func startRecording() {
 
     rec.onRecordingComplete = { audioURL in
         guard let url = audioURL else {
-            stopAnimation()
             state = .idle
             setStatus("🎙")
             logInfo("Recording cancelled (no audio)")
@@ -162,7 +161,6 @@ func startRecording() {
         try rec.start()
     } catch {
         logError("Failed to start recording: \(error)")
-        stopAnimation()
         state = .idle
         setStatus("🎙")
     }
@@ -177,7 +175,6 @@ func stopRecording() {
 
 func transcribe(audioURL: URL) {
     state = .transcribing
-    stopAnimation()
     startAnimation(["⌛", "⏳"], interval: 0.5)
     logInfo("Transcribing...")
 
@@ -193,19 +190,43 @@ func transcribe(audioURL: URL) {
 
         do {
             guard let t = transcriber else { return }
-            var text = try t.transcribe(audioURL: audioURL)
 
-            if text.isEmpty {
-                logInfo("Transcription returned empty result")
-                return
-            }
+            if config.enableLLMCleanup {
+                // LLM cleanup needs the full text — wait for whisper to finish,
+                // clean everything, then paste all at once.
+                var text = try t.transcribe(audioURL: audioURL)
+                guard !text.isEmpty else {
+                    logInfo("Transcription returned empty result")
+                    return
+                }
+                text = textCleaner.clean(text)
+                logInfo("Transcription complete: \(text.prefix(80))...")
+                DispatchQueue.main.async {
+                    TextInjector.type(text)
+                    playDoneSound()
+                }
+            } else {
+                // Streaming: inject each sentence as whisper produces it.
+                DispatchQueue.main.async { TextInjector.beginStream() }
+                var hasOutput = false
 
-            text = textCleaner.clean(text)
-            logInfo("Transcription complete: \(text.prefix(80))...")
+                _ = try t.transcribe(audioURL: audioURL) { rawSegment in
+                    var seg = rawSegment.trimmingCharacters(in: .whitespacesAndNewlines)
+                    seg = textCleaner.clean(seg)
+                    guard !seg.isEmpty else { return }
+                    hasOutput = true
+                    logInfo("Segment: \(seg.prefix(80))")
+                    DispatchQueue.main.async { TextInjector.typeChunk(seg) }
+                }
 
-            DispatchQueue.main.async {
-                TextInjector.type(text)
-                playDoneSound()
+                if !hasOutput {
+                    logInfo("Transcription returned empty result")
+                }
+
+                DispatchQueue.main.async {
+                    TextInjector.endStream()
+                    playDoneSound()
+                }
             }
         } catch {
             logError("Transcription error: \(error)")
