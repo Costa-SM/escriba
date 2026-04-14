@@ -63,10 +63,9 @@ else
     cd "${WHISPER_DIR}"
 fi
 
-info "Building whisper.cpp (with Metal/CoreML acceleration)..."
+info "Building whisper.cpp (with Metal acceleration)..."
 cmake -B build \
     -DWHISPER_METAL=ON \
-    -DWHISPER_COREML=ON \
     -DBUILD_SHARED_LIBS=ON \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}/whisper-install" \
@@ -136,49 +135,56 @@ WHISPER_LIB="${INSTALL_DIR}/whisper-install/lib"
 # Copy whisper.h into our CWhisper module so Swift can find it
 cp "${WHISPER_INCLUDE}/whisper.h" "Sources/CWhisper/whisper.h"
 
-info "Building whisper-dictation..."
+info "Building Escriba..."
 
 swift build -c release \
     -Xcc "-I${WHISPER_INCLUDE}" \
     -Xlinker "-L${WHISPER_LIB}" \
     -Xlinker "-lwhisper" \
-    -Xlinker "-rpath" -Xlinker "${WHISPER_LIB}" \
+    -Xlinker "-rpath" -Xlinker "@executable_path" \
     2>&1 | tail -5
 
-# Copy binary and co-locate libwhisper so it's found at runtime.
-# macOS SIP strips DYLD_LIBRARY_PATH from launchd agents, so we can't
-# rely on environment variables. Instead we copy the dylib next to the
-# binary and rewrite the rpath to @executable_path.
-cp "$(swift build -c release --show-bin-path)/WhisperDictation" "${BIN_DIR}/whisper-dictation"
+# Re-sign with a stable bundle identifier so macOS TCC tracks the permission
+# by ID (com.whisper-dictation.escriba) rather than by binary hash.
+# Without this, every rebuild invalidates the Accessibility grant.
+codesign --force --sign - \
+    --identifier com.whisper-dictation.escriba \
+    "$(swift build -c release --show-bin-path)/WhisperDictation"
 
-# Copy libwhisper dylib next to binary
-WHISPER_DYLIB=$(find "${WHISPER_LIB}" -name 'libwhisper*.dylib' -not -name '*compat*' | head -1)
-if [[ -n "${WHISPER_DYLIB}" ]]; then
-    cp "${WHISPER_DYLIB}" "${BIN_DIR}/"
-    DYLIB_NAME=$(basename "${WHISPER_DYLIB}")
-    # Rewrite the binary's rpath to look next to itself
-    install_name_tool -add_rpath @executable_path "${BIN_DIR}/whisper-dictation" 2>/dev/null || true
-    ok "Binary + libwhisper installed to ${BIN_DIR}/"
-else
-    warn "Could not find libwhisper dylib — binary may fail at runtime"
-    ok "Binary installed to ${BIN_DIR}/whisper-dictation"
-fi
+# ── Create .app bundle inside ~/.local/share ──────────────────
+# The bundle lives in ~/.local/share/escriba/ so Santa's home-directory
+# scope rule allows it (Santa blocks unknown binaries in /Applications/).
+# Running from inside a bundle gives TCC a stable bundle-ID identity
+# (com.whisper-dictation.escriba) instead of a per-rebuild binary hash,
+# so the Accessibility grant survives future rebuilds.
 
-# ── Create .app bundle for Spotlight / Raycast visibility ─────
-
-APP_DIR="/Applications/Escriba.app"
+APP_DIR="${HOME}/.local/share/escriba/Escriba.app"
 APP_CONTENTS="${APP_DIR}/Contents"
 APP_MACOS="${APP_CONTENTS}/MacOS"
 
-info "Creating Escriba.app bundle..."
+info "Installing Escriba.app bundle..."
 mkdir -p "${APP_MACOS}"
 
-# Launcher script that execs the real binary
-cat > "${APP_MACOS}/Escriba" <<'LAUNCHER'
-#!/bin/bash
-exec "$HOME/.local/bin/whisper-dictation"
-LAUNCHER
-chmod +x "${APP_MACOS}/Escriba"
+# Install the re-signed binary as "Escriba" inside the bundle
+cp "$(swift build -c release --show-bin-path)/WhisperDictation" "${APP_MACOS}/Escriba"
+
+# Co-locate all ggml/whisper dylibs next to the binary
+for lib in $(find "${WHISPER_LIB}" -name '*.dylib' | grep -v coreml); do
+    cp "${lib}" "${APP_MACOS}/"
+done
+# Ensure .0.dylib symlinks exist
+for versioned in "${APP_MACOS}"/lib*.*.*.dylib; do
+    base=$(basename "$versioned")
+    short=$(echo "$base" | sed 's/\.[0-9]*\.[0-9]*\.dylib/.dylib/')
+    dot0=$(echo "$base"  | sed 's/\.[0-9]*\.[0-9]*\.dylib/.0.dylib/')
+    [[ -f "${APP_MACOS}/$short" ]] || ln -sf "$base" "${APP_MACOS}/$short"
+    [[ -f "${APP_MACOS}/$dot0"  ]] || ln -sf "$base" "${APP_MACOS}/$dot0"
+done
+
+ok "Binary + dylibs installed inside ${APP_DIR}"
+
+# Convenience symlink in PATH
+ln -sf "${APP_MACOS}/Escriba" "${BIN_DIR}/escriba"
 
 # Info.plist
 cat > "${APP_CONTENTS}/Info.plist" <<'INFOPLIST'
@@ -253,7 +259,7 @@ cat > "${PLIST_PATH}" <<PLIST
     <string>${PLIST_NAME}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${BIN_DIR}/whisper-dictation</string>
+        <string>${APP_MACOS}/Escriba</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

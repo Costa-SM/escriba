@@ -15,7 +15,6 @@ final class Transcriber {
         }
 
         var cparams = whisper_context_default_params()
-        // Enable CoreML / Metal acceleration on Apple Silicon
         cparams.use_gpu = true
 
         guard let ctx = whisper_init_from_file_with_params(modelPath, cparams) else {
