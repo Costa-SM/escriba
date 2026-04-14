@@ -1,133 +1,180 @@
 import AVFoundation
 import Foundation
 
-/// Records audio from the default input device to a temp WAV file.
-/// Whisper expects 16kHz mono 16-bit PCM.
+/// Records audio from the default input device, splitting output into phrase-sized chunks.
+///
+/// When a short pause is detected (`chunkSilenceThreshold`) the current audio is flushed
+/// via `onChunkReady` and a new chunk starts — without stopping the engine. This lets the
+/// caller begin transcribing the first phrase while the user is still speaking the next one.
+/// When a longer pause (`config.silenceTimeout`) or manual stop is detected, the final
+/// chunk is flushed and `onRecordingComplete` fires.
 final class AudioRecorder {
     private var audioEngine: AVAudioEngine?
     private var audioFile: AVAudioFile?
-    private var outputURL: URL?
-    private var silenceTimer: Timer?
+    private var chunkURL: URL?
+    private var wavFormat: AVAudioFormat?
     private var maxTimer: Timer?
     private let config: Config
 
-    /// Called when recording stops (silence timeout, max duration, or manual).
-    var onRecordingComplete: ((URL?) -> Void)?
+    /// Called on the main thread each time a phrase-sized chunk is ready.
+    var onChunkReady: ((URL) -> Void)?
 
-    // Silence detection state
-    private var silentSamples: Int = 0
+    /// Called on the main thread when the session ends (no more chunks will arrive).
+    var onRecordingComplete: (() -> Void)?
+
+    // Silence tracking
+    private var chunkSilentFrames = 0   // resets when a chunk is flushed or speech resumes
+    private var sessionSilentFrames = 0 // resets only when speech resumes
+    private var currentChunkHasAudio = false
+    private var stopped = false
+
     private let silenceThresholdRMS: Float = 0.01
 
     init(config: Config) {
         self.config = config
     }
 
-    /// Start recording. Returns immediately; audio is captured in the background.
+    /// Start recording. Returns immediately; audio is captured on AVAudioEngine's thread.
     func start() throws {
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
-        // Target format: 16kHz mono Float32 (we'll convert to 16-bit PCM on write)
         guard let recordingFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: 16000,
             channels: 1,
             interleaved: false
-        ) else {
-            throw RecorderError.formatError
-        }
+        ) else { throw RecorderError.formatError }
 
         guard let converter = AVAudioConverter(from: inputFormat, to: recordingFormat) else {
             throw RecorderError.converterError
         }
 
-        // Output file in 16-bit PCM WAV for whisper.cpp
-        guard let wavFormat = AVAudioFormat(
+        guard let wf = AVAudioFormat(
             commonFormat: .pcmFormatInt16,
             sampleRate: 16000,
             channels: 1,
             interleaved: true
-        ) else {
-            throw RecorderError.formatError
-        }
+        ) else { throw RecorderError.formatError }
 
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("whisper-dictation-\(UUID().uuidString).wav")
-        let file = try AVAudioFile(forWriting: url, settings: wavFormat.settings)
-
-        self.outputURL = url
-        self.audioFile = file
+        self.wavFormat = wf
         self.audioEngine = engine
-        self.silentSamples = 0
+        self.stopped = false
 
-        let silenceTimeoutSamples = Int(16000 * config.silenceTimeout)
+        try openNewChunk()
+
+        // Phrase-boundary pause: shorter than session end so we can pipeline.
+        // For the default silenceTimeout of 2.0 s this gives a 1.0 s chunk boundary.
+        let chunkThresholdFrames = Int(16000.0 * max(0.4, config.silenceTimeout * 0.5))
+        let sessionThresholdFrames = config.silenceTimeout > 0
+            ? Int(16000.0 * config.silenceTimeout) : Int.max
 
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) {
             [weak self] buffer, _ in
-            guard let self = self else { return }
+            guard let self, !self.stopped else { return }
 
-            // Convert to 16kHz mono
+            // Downsample to 16 kHz mono
             let frameCount = AVAudioFrameCount(
-                Double(buffer.frameLength) * 16000 / inputFormat.sampleRate
+                Double(buffer.frameLength) * 16000.0 / inputFormat.sampleRate
             )
             guard frameCount > 0,
-                  let convertedBuffer = AVAudioPCMBuffer(
-                      pcmFormat: recordingFormat, frameCapacity: frameCount)
+                  let converted = AVAudioPCMBuffer(pcmFormat: recordingFormat,
+                                                   frameCapacity: frameCount)
             else { return }
 
-            var error: NSError?
-            let status = converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
+            var err: NSError?
+            let status = converter.convert(to: converted, error: &err) { _, outStatus in
                 outStatus.pointee = .haveData
                 return buffer
             }
+            guard status != .error, err == nil else { return }
 
-            guard status != .error, error == nil else { return }
+            try? self.audioFile?.write(from: converted)
 
-            // Write to file
-            try? self.audioFile?.write(from: convertedBuffer)
+            let rms = self.computeRMS(buffer: converted)
+            let frames = Int(converted.frameLength)
 
-            // Silence detection
-            if self.config.silenceTimeout > 0 {
-                let rms = self.computeRMS(buffer: convertedBuffer)
-                if rms < self.silenceThresholdRMS {
-                    self.silentSamples += Int(convertedBuffer.frameLength)
-                    if self.silentSamples >= silenceTimeoutSamples {
-                        DispatchQueue.main.async { self.stop() }
-                    }
-                } else {
-                    self.silentSamples = 0
+            if rms < self.silenceThresholdRMS {
+                self.chunkSilentFrames   += frames
+                self.sessionSilentFrames += frames
+
+                // Flush phrase chunk on short pause (if it contains speech)
+                if self.currentChunkHasAudio && self.chunkSilentFrames >= chunkThresholdFrames {
+                    self.flushCurrentChunk()
                 }
+
+                // End session on long pause
+                if self.sessionSilentFrames >= sessionThresholdFrames {
+                    DispatchQueue.main.async { self.stop() }
+                }
+            } else {
+                self.chunkSilentFrames   = 0
+                self.sessionSilentFrames = 0
+                self.currentChunkHasAudio = true
             }
         }
 
         try engine.start()
 
-        // Safety timeout
         if config.maxRecordSeconds > 0 {
             maxTimer = Timer.scheduledTimer(
                 withTimeInterval: TimeInterval(config.maxRecordSeconds),
                 repeats: false
-            ) { [weak self] _ in
-                self?.stop()
-            }
+            ) { [weak self] _ in self?.stop() }
         }
     }
 
-    /// Stop recording and deliver the audio file.
+    /// Stop recording. Safe to call multiple times.
     func stop() {
+        guard !stopped else { return }
+        stopped = true
+
         maxTimer?.invalidate()
         maxTimer = nil
-        silenceTimer?.invalidate()
-        silenceTimer = nil
 
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil
-        audioFile = nil
 
-        onRecordingComplete?(outputURL)
-        outputURL = nil
+        // Flush any speech that hasn't been emitted yet
+        if currentChunkHasAudio, let url = chunkURL {
+            audioFile = nil
+            chunkURL = nil
+            currentChunkHasAudio = false
+            onChunkReady?(url)
+        } else {
+            if let url = chunkURL { try? FileManager.default.removeItem(at: url) }
+            audioFile = nil
+            chunkURL = nil
+        }
+
+        onRecordingComplete?()
+    }
+
+    // ── Internals ─────────────────────────────────────────────────────────────
+
+    private func flushCurrentChunk() {
+        guard let url = chunkURL else { return }
+        audioFile = nil
+        chunkURL = nil
+        currentChunkHasAudio = false
+        chunkSilentFrames = 0
+
+        let flushedURL = url
+        DispatchQueue.main.async { self.onChunkReady?(flushedURL) }
+
+        // Start a fresh file for the next phrase
+        try? openNewChunk()
+    }
+
+    private func openNewChunk() throws {
+        guard let fmt = wavFormat else { return }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("escriba-chunk-\(UUID().uuidString).wav")
+        audioFile = try AVAudioFile(forWriting: url, settings: fmt.settings)
+        chunkURL = url
+        currentChunkHasAudio = false
     }
 
     private func computeRMS(buffer: AVAudioPCMBuffer) -> Float {
@@ -136,9 +183,7 @@ final class AudioRecorder {
         guard count > 0 else { return 0 }
         let data = channelData[0]
         var sumSquares: Float = 0
-        for i in 0..<count {
-            sumSquares += data[i] * data[i]
-        }
+        for i in 0..<count { sumSquares += data[i] * data[i] }
         return sqrtf(sumSquares / Float(count))
     }
 

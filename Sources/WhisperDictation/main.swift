@@ -59,7 +59,8 @@ statusItem.menu = menu
 
 logInfo("Menu bar icon created")
 
-// ── Thread-safe state machine ────────────────────────────────
+// ── State machine ────────────────────────────────────────────
+// All state mutations happen on the main thread.
 
 enum DictationState {
     case idle
@@ -67,21 +68,23 @@ enum DictationState {
     case transcribing
 }
 
-let stateLock = NSLock()
-var _state: DictationState = .idle
-var state: DictationState {
-    get { stateLock.withLock { _state } }
-    set { stateLock.withLock { _state = newValue } }
-}
+var state: DictationState = .idle
 
 var recorder: AudioRecorder?
 var transcriber: Transcriber?
+
+// Number of phrase chunks still being transcribed.
+// Only ever touched on the main thread.
+var pendingChunks = 0
+
+// Serial queue: ensures chunks are transcribed in the order they arrived
+// and that text is injected in the correct sequence.
+let transcriptionQueue = DispatchQueue(label: "com.escriba.transcription", qos: .userInitiated)
 
 // ── Menu bar icon animation ──────────────────────────────────
 
 var animationTimer: Timer?
 
-// Must be called from any thread; schedules/cancels on the main run loop.
 func startAnimation(_ frames: [String], interval: TimeInterval = 0.6) {
     DispatchQueue.main.async {
         animationTimer?.invalidate()
@@ -90,7 +93,6 @@ func startAnimation(_ frames: [String], interval: TimeInterval = 0.6) {
             statusItem.button?.title = frames[i % frames.count]
             i += 1
         }
-        // Show the first frame immediately
         statusItem.button?.title = frames[0]
     }
 }
@@ -135,6 +137,75 @@ do {
 
 let textCleaner = TextCleaner(config: config)
 
+// ── Chunk pipeline ───────────────────────────────────────────
+//
+// AudioRecorder emits phrase-sized WAV chunks whenever it detects a short pause.
+// Each chunk is queued on a serial transcription queue so results arrive in order.
+// The recorder keeps running during transcription, giving the user immediate
+// feedback (text for phrase N appears while they speak phrase N+1).
+
+/// Called on the main thread each time AudioRecorder has a complete phrase chunk.
+func handleChunk(url: URL) {
+    pendingChunks += 1
+    logInfo("Chunk queued (pending: \(pendingChunks))")
+
+    transcriptionQueue.async {
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            DispatchQueue.main.async { chunkFinished() }
+        }
+
+        do {
+            guard let t = transcriber else { return }
+            var text = try t.transcribe(audioURL: url)
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                logInfo("Chunk produced empty result")
+                return
+            }
+            text = textCleaner.clean(text)
+            logInfo("Chunk: \(text.prefix(80))")
+            DispatchQueue.main.async {
+                TextInjector.typeChunk(text)
+            }
+        } catch {
+            logError("Chunk transcription error: \(error)")
+        }
+    }
+}
+
+/// Called on the main thread when a chunk transcription finishes.
+func chunkFinished() {
+    pendingChunks -= 1
+    logInfo("Chunk done (pending: \(pendingChunks))")
+    if state == .transcribing && pendingChunks == 0 {
+        finishSession()
+    }
+}
+
+/// Called on the main thread when recording has stopped.
+func recordingEnded() {
+    recorder = nil
+    if pendingChunks > 0 {
+        // Still waiting for background transcriptions to complete.
+        state = .transcribing
+        startAnimation(["⌛", "⏳"], interval: 0.5)
+        logInfo("Recording done — waiting for \(pendingChunks) pending chunk(s)")
+    } else {
+        finishSession()
+    }
+}
+
+/// Tear down after the session is fully complete.
+func finishSession() {
+    stopAnimation()
+    TextInjector.endStream()
+    playDoneSound()
+    state = .idle
+    setStatus("🎙")
+    logInfo("Session complete")
+}
+
 // ── Recording flow ───────────────────────────────────────────
 
 func startRecording() {
@@ -144,23 +215,25 @@ func startRecording() {
     playStartSound()
     logInfo("Recording started")
 
+    // Save clipboard once for the whole session; restored in finishSession → endStream.
+    TextInjector.beginStream()
+
     let rec = AudioRecorder(config: config)
     recorder = rec
 
-    rec.onRecordingComplete = { audioURL in
-        guard let url = audioURL else {
-            state = .idle
-            setStatus("🎙")
-            logInfo("Recording cancelled (no audio)")
-            return
-        }
-        transcribe(audioURL: url)
+    rec.onChunkReady = { audioURL in
+        handleChunk(url: audioURL)
+    }
+
+    rec.onRecordingComplete = {
+        recordingEnded()
     }
 
     do {
         try rec.start()
     } catch {
         logError("Failed to start recording: \(error)")
+        TextInjector.endStream()
         state = .idle
         setStatus("🎙")
     }
@@ -170,68 +243,7 @@ func stopRecording() {
     guard state == .recording else { return }
     logInfo("Recording stopped by user")
     recorder?.stop()
-    recorder = nil
-}
-
-func transcribe(audioURL: URL) {
-    state = .transcribing
-    startAnimation(["⌛", "⏳"], interval: 0.5)
-    logInfo("Transcribing...")
-
-    DispatchQueue.global(qos: .userInitiated).async {
-        defer {
-            try? FileManager.default.removeItem(at: audioURL)
-            DispatchQueue.main.async {
-                stopAnimation()
-                state = .idle
-                setStatus("🎙")
-            }
-        }
-
-        do {
-            guard let t = transcriber else { return }
-
-            if config.enableLLMCleanup {
-                // LLM cleanup needs the full text — wait for whisper to finish,
-                // clean everything, then paste all at once.
-                var text = try t.transcribe(audioURL: audioURL)
-                guard !text.isEmpty else {
-                    logInfo("Transcription returned empty result")
-                    return
-                }
-                text = textCleaner.clean(text)
-                logInfo("Transcription complete: \(text.prefix(80))...")
-                DispatchQueue.main.async {
-                    TextInjector.type(text)
-                    playDoneSound()
-                }
-            } else {
-                // Streaming: inject each sentence as whisper produces it.
-                DispatchQueue.main.async { TextInjector.beginStream() }
-                var hasOutput = false
-
-                _ = try t.transcribe(audioURL: audioURL) { rawSegment in
-                    var seg = rawSegment.trimmingCharacters(in: .whitespacesAndNewlines)
-                    seg = textCleaner.clean(seg)
-                    guard !seg.isEmpty else { return }
-                    hasOutput = true
-                    logInfo("Segment: \(seg.prefix(80))")
-                    DispatchQueue.main.async { TextInjector.typeChunk(seg) }
-                }
-
-                if !hasOutput {
-                    logInfo("Transcription returned empty result")
-                }
-
-                DispatchQueue.main.async {
-                    TextInjector.endStream()
-                    playDoneSound()
-                }
-            }
-        } catch {
-            logError("Transcription error: \(error)")
-        }
-    }
+    // recorder.stop() calls onRecordingComplete → recordingEnded(), which clears recorder.
 }
 
 // ── Hotkey listener ──────────────────────────────────────────
@@ -244,7 +256,7 @@ hotkey.onDoubleTap = {
     case .recording:
         stopRecording()
     case .transcribing:
-        break // Ignore taps while transcribing
+        break // Ignore — waiting for pending chunks
     }
 }
 
@@ -278,11 +290,8 @@ func tryStartHotkey() {
 }
 
 // ── Bootstrap after run loop starts ─────────────────────────
-// Dispatching async ensures the NSApplication run loop is live before we
-// trigger system permission dialogs and start the hotkey poll.
 
 DispatchQueue.main.async {
-    // Microphone: system shows a one-time "Allow microphone access?" dialog.
     AVCaptureDevice.requestAccess(for: .audio) { granted in
         if granted {
             logInfo("Microphone permission granted")
