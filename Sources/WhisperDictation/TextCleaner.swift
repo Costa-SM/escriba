@@ -7,27 +7,37 @@ final class TextCleaner {
     /// Max seconds to wait for LLM cleanup before falling back to rule-based result.
     private let llmTimeoutSeconds: Double = 15.0
 
+    /// Runtime toggle — can be flipped from the menu bar without restarting.
+    /// Initialised from config.enableLLMCleanup but overrideable at any time.
+    var llmEnabled: Bool
+
     init(config: Config) {
         self.config = config
+        self.llmEnabled = config.enableLLMCleanup
     }
 
-    /// Clean transcribed text: remove fillers, normalize whitespace.
-    /// If LLM post-processing is enabled, also run through a local model.
+    /// Full cleanup: rule-based + optional LLM. Use for complete utterances.
     func clean(_ text: String) -> String {
-        var result = text
-
-        // Step 1: Rule-based cleanup (always active, fast)
-        result = removeFillers(result)
-        result = normalizeWhitespace(result)
-        result = fixCommonArtifacts(result)
-
-        // Step 2: LLM cleanup (optional, slower but higher quality)
-        if config.enableLLMCleanup {
+        var result = rulesOnly(text)
+        if llmEnabled {
             if let llmResult = llmCleanup(result) {
                 result = llmResult
             }
         }
+        return result
+    }
 
+    /// Rule-based cleanup only — no LLM. Use for streaming chunks where the
+    /// LLM would see a sentence fragment and add spurious terminal punctuation.
+    func cleanFast(_ text: String) -> String {
+        rulesOnly(text)
+    }
+
+    private func rulesOnly(_ text: String) -> String {
+        var result = text
+        result = removeFillers(result)
+        result = normalizeWhitespace(result)
+        result = fixCommonArtifacts(result)
         return result
     }
 

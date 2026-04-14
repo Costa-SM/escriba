@@ -28,6 +28,9 @@ final class AudioRecorder {
     private var currentChunkHasAudio = false
     private var stopped = false
 
+    // Time-based flush: emit a chunk every 2 s during continuous speech
+    private var lastFlushTime = Date()
+
     private let silenceThresholdRMS: Float = 0.01
 
     init(config: Config) {
@@ -95,6 +98,13 @@ final class AudioRecorder {
             let rms = self.computeRMS(buffer: converted)
             let frames = Int(converted.frameLength)
 
+            // Time-based flush: emit chunk every 2 s regardless of silence
+            let now = Date()
+            if self.currentChunkHasAudio && now.timeIntervalSince(self.lastFlushTime) >= 2.0 {
+                self.lastFlushTime = now
+                self.flushCurrentChunk()
+            }
+
             if rms < self.silenceThresholdRMS {
                 self.chunkSilentFrames   += frames
                 self.sessionSilentFrames += frames
@@ -160,6 +170,7 @@ final class AudioRecorder {
         chunkURL = nil
         currentChunkHasAudio = false
         chunkSilentFrames = 0
+        lastFlushTime = Date()
 
         let flushedURL = url
         DispatchQueue.main.async { self.onChunkReady?(flushedURL) }

@@ -39,6 +39,12 @@ class MenuHandler: NSObject {
             [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
         )
     }
+
+    @objc func toggleLLM(_ sender: NSMenuItem) {
+        textCleaner.llmEnabled.toggle()
+        sender.state = textCleaner.llmEnabled ? .on : .off
+        logInfo("LLM cleanup toggled \(textCleaner.llmEnabled ? "ON" : "OFF")")
+    }
 }
 let menuHandler = MenuHandler()
 
@@ -51,6 +57,16 @@ let accessibilityItem = NSMenuItem(
 )
 accessibilityItem.target = menuHandler
 menu.addItem(accessibilityItem)
+menu.addItem(.separator())
+
+let llmItem = NSMenuItem(
+    title: "LLM Cleanup",
+    action: #selector(MenuHandler.toggleLLM(_:)),
+    keyEquivalent: ""
+)
+llmItem.target = menuHandler
+llmItem.state = config.enableLLMCleanup ? .on : .off
+menu.addItem(llmItem)
 menu.addItem(.separator())
 
 let quitItem = NSMenuItem(title: "Quit Escriba", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -163,7 +179,7 @@ func handleChunk(url: URL) {
                 logInfo("Chunk produced empty result")
                 return
             }
-            text = textCleaner.clean(text)
+            text = textCleaner.cleanFast(text)
             logInfo("Chunk: \(text.prefix(80))")
             DispatchQueue.main.async {
                 TextInjector.typeChunk(text)
