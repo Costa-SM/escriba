@@ -34,10 +34,10 @@ statusItem.button?.title = "🎙"
 
 // Menu action target
 class MenuHandler: NSObject {
-    @objc func openAccessibilitySettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-            NSWorkspace.shared.open(url)
-        }
+    @objc func requestAccessibilityPermission() {
+        AXIsProcessTrustedWithOptions(
+            [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
+        )
     }
 }
 let menuHandler = MenuHandler()
@@ -46,7 +46,7 @@ let menu = NSMenu()
 
 let accessibilityItem = NSMenuItem(
     title: "⚠️ Grant Accessibility Permission…",
-    action: #selector(MenuHandler.openAccessibilitySettings),
+    action: #selector(MenuHandler.requestAccessibilityPermission),
     keyEquivalent: ""
 )
 accessibilityItem.target = menuHandler
