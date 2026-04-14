@@ -237,7 +237,7 @@ func tryStartHotkey() {
     do {
         try hotkey.start()
         setStatus("🎙")
-        logInfo("Hotkey listener active — double-tap Control to dictate")
+        logInfo("Hotkey listener active — double-tap fn/Globe to dictate")
         logInfo("Language: \(config.language)")
         if config.enableLLMCleanup {
             logInfo("LLM cleanup: ON (\(config.llmCleanupModel))")

@@ -8,7 +8,7 @@ struct Config: Codable {
     /// Language code (ISO 639-1) or "auto" for detection
     var language: String = "auto"
 
-    /// Max seconds between two Control presses to register as double-tap
+    /// Max seconds between two fn/Globe presses to register as double-tap
     var doubleTapInterval: Double = 0.4
 
     /// Max recording duration in seconds (safety cutoff)

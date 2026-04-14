@@ -1,12 +1,17 @@
 import AppKit
 import Carbon
 
-/// Listens for a double-tap of the Control key using a CGEvent tap.
+/// Listens for a double-tap of the fn/Globe key using a CGEvent tap.
 /// Requires Accessibility permission (System Settings > Privacy > Accessibility).
+///
+/// The second fn tap is swallowed (returned nil from the tap callback) so that
+/// macOS's own "double-tap fn to dictate" shortcut does not also fire.
+/// If both Escriba and system dictation still activate, disable the system
+/// shortcut at System Settings → Keyboard → Dictation → Keyboard Shortcut.
 final class HotkeyListener {
     private let interval: Double
-    private var lastControlPress: Date?
-    private var controlWasDown: Bool = false
+    private var lastFnPress: Date?
+    private var fnWasDown: Bool = false
     private var eventTap: CFMachPort?
 
     /// Fires when a double-tap is detected.
@@ -17,11 +22,9 @@ final class HotkeyListener {
     }
 
     func start() throws {
-        // We need to capture flagsChanged (modifier key) events
-        let eventMask: CGEventMask =
-            (1 << CGEventType.flagsChanged.rawValue)
+        // flagsChanged fires on every modifier-key transition, including fn/Globe.
+        let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue)
 
-        // Store self in a pointer we can recover inside the C callback
         let userInfo = Unmanaged.passUnretained(self).toOpaque()
 
         guard let tap = CGEvent.tapCreate(
@@ -35,8 +38,7 @@ final class HotkeyListener {
                 }
                 let listener = Unmanaged<HotkeyListener>
                     .fromOpaque(userInfo).takeUnretainedValue()
-                listener.handleEvent(event)
-                return Unmanaged.passRetained(event)
+                return listener.handleEvent(event)
             },
             userInfo: userInfo
         ) else {
@@ -50,30 +52,33 @@ final class HotkeyListener {
         CGEvent.tapEnable(tap: tap, enable: true)
     }
 
-    private func handleEvent(_ event: CGEvent) {
+    private func handleEvent(_ event: CGEvent) -> Unmanaged<CGEvent>? {
         let flags = event.flags
-        let controlNowDown = flags.contains(.maskControl)
+        let fnNowDown = flags.contains(.maskSecondaryFn)
 
-        // Ignore if other modifiers are held (Shift, Cmd, Option)
-        let otherModifiers: CGEventFlags = [.maskShift, .maskCommand, .maskAlternate]
+        // Ignore if standard modifiers are also held (fn+Shift, fn+Cmd, etc.)
+        let otherModifiers: CGEventFlags = [.maskShift, .maskCommand, .maskAlternate, .maskControl]
         if !flags.intersection(otherModifiers).isEmpty {
-            controlWasDown = controlNowDown
-            return
+            fnWasDown = fnNowDown
+            return Unmanaged.passRetained(event)
         }
 
-        // Detect transition: Control was up → now pressed down (key-down edge only)
-        if controlNowDown && !controlWasDown {
+        // Detect fn key-down edge (up → down transition only)
+        if fnNowDown && !fnWasDown {
             let now = Date()
-            if let last = lastControlPress, now.timeIntervalSince(last) <= interval {
-                // Double-tap detected
-                lastControlPress = nil
-                onDoubleTap?()
+            if let last = lastFnPress, now.timeIntervalSince(last) <= interval {
+                // Double-tap confirmed — swallow this event so macOS dictation doesn't fire.
+                lastFnPress = nil
+                fnWasDown = fnNowDown
+                DispatchQueue.main.async { self.onDoubleTap?() }
+                return nil
             } else {
-                lastControlPress = now
+                lastFnPress = now
             }
         }
 
-        controlWasDown = controlNowDown
+        fnWasDown = fnNowDown
+        return Unmanaged.passRetained(event)
     }
 
     func stop() {
