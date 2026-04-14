@@ -144,13 +144,6 @@ swift build -c release \
     -Xlinker "-rpath" -Xlinker "@executable_path" \
     2>&1 | tail -5
 
-# Re-sign with a stable bundle identifier so macOS TCC tracks the permission
-# by ID (com.whisper-dictation.escriba) rather than by binary hash.
-# Without this, every rebuild invalidates the Accessibility grant.
-codesign --force --sign - \
-    --identifier com.whisper-dictation.escriba \
-    "$(swift build -c release --show-bin-path)/WhisperDictation"
-
 # ── Create .app bundle inside ~/.local/share ──────────────────
 # The bundle lives in ~/.local/share/escriba/ so Santa's home-directory
 # scope rule allows it (Santa blocks unknown binaries in /Applications/).
@@ -165,7 +158,7 @@ APP_MACOS="${APP_CONTENTS}/MacOS"
 info "Installing Escriba.app bundle..."
 mkdir -p "${APP_MACOS}"
 
-# Install the re-signed binary as "Escriba" inside the bundle
+# Copy the unsigned binary into the bundle first
 cp "$(swift build -c release --show-bin-path)/WhisperDictation" "${APP_MACOS}/Escriba"
 
 # Co-locate all ggml/whisper dylibs next to the binary
@@ -217,7 +210,15 @@ cat > "${APP_CONTENTS}/Info.plist" <<'INFOPLIST'
 </plist>
 INFOPLIST
 
-ok "Escriba.app created in /Applications"
+# Sign the entire bundle after all files are in place.
+# Signing the binary before copying into the bundle produces an invalid
+# signature ("code has no resources but signature indicates they must be
+# present"), which causes OS_REASON_CODESIGNING crashes at launch.
+codesign --force --sign - \
+    --identifier com.whisper-dictation.escriba \
+    "${APP_DIR}"
+
+ok "Escriba.app signed and installed at ${APP_DIR}"
 
 # ── Write default config if none exists ───────────────────────
 

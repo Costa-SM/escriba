@@ -12,7 +12,7 @@ Built on [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for fast, local
 - **Filler removal** — strips "um", "uh", "like" and other verbal fillers automatically
 - **Optional LLM cleanup** — post-process transcriptions with a local language model for grammar and clarity
 - **Runs locally** — all processing happens on your Mac using Metal GPU acceleration
-- **Animated menu bar** — icon animates while recording (⏺/🔴) and transcribing (⌛/⏳), returns to 🎙 when idle
+- **Menu bar status** — shows 🔴 while recording and animates ⌛/⏳ while transcribing, returns to 🎙 when idle
 - **Audio cues** — plays a sound when recording starts and when the result is pasted
 - **Auto-permission prompts** — requests Accessibility and Microphone access on first launch; no manual setup required
 - **Configurable** — model size, language, silence timeout, hotkey timing, all in a single JSON file
@@ -58,7 +58,7 @@ After installation, double-tap the **fn/Globe (🌐)** key to start dictating. S
 3. Clean up the text (remove fillers, fix artifacts)
 4. Paste the result at your cursor
 
-The menu bar icon shows the current state: 🎙 idle, ⏺/🔴 recording, ⌛/⏳ transcribing.
+The menu bar icon shows the current state: 🎙 idle, 🔴 recording, ⌛/⏳ transcribing.
 
 ### Grant permissions on first launch
 
@@ -77,15 +77,21 @@ macOS also uses double-tap fn to trigger its built-in Dictation. To avoid both f
 
 ### Verifying it's running
 
-Check the menu bar for the 🎙 icon. If it's missing, check the logs:
+Check the menu bar for the 🎙 icon. If it's missing:
 
 ```bash
-# Startup and runtime logs
+# Check the daemon state
+launchctl print gui/$(id -u)/com.whisper-dictation.agent | grep "state ="
+
+# View startup and runtime logs
 cat ~/.local/share/whisper-dictation/stderr.log
 
-# Is the daemon running?
-launchctl print gui/$(id -u)/com.whisper-dictation.agent | grep "state ="
+# Restart the daemon
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.whisper-dictation.agent.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.whisper-dictation.agent.plist
 ```
+
+> **Note:** `launchctl kickstart -k` sends SIGKILL and may leave the agent in a bad state. Always use `bootout` + `bootstrap` to restart cleanly.
 
 ## Configuration
 
@@ -120,7 +126,8 @@ Edit `~/.config/whisper-dictation/config.json`:
 Changes take effect after restarting the daemon:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.whisper-dictation.agent
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.whisper-dictation.agent.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.whisper-dictation.agent.plist
 ```
 
 ## Switching models
@@ -133,7 +140,8 @@ curl -L -o ~/.local/share/whisper-dictation/models/ggml-large-v3.bin \
 # Edit ~/.config/whisper-dictation/config.json → "model": "large-v3"
 
 # Restart
-launchctl kickstart -k gui/$(id -u)/com.whisper-dictation.agent
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.whisper-dictation.agent.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.whisper-dictation.agent.plist
 ```
 
 ## Uninstall
