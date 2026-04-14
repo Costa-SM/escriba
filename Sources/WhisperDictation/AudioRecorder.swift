@@ -28,10 +28,18 @@ final class AudioRecorder {
     private var currentChunkHasAudio = false
     private var stopped = false
 
-    // Time-based flush: emit a chunk every 2 s during continuous speech
+    // Time-based flush with grace period for word-boundary detection
     private var lastFlushTime = Date()
+    private var seekingSilence = false        // in grace period, waiting for a micro-silence
+    private var seekingSilenceStart = Date()
 
     private let silenceThresholdRMS: Float = 0.01
+    /// Slightly higher threshold to catch brief dips between words.
+    private let microSilenceRMS: Float = 0.015
+    /// Start looking for a word boundary after this many seconds.
+    private let chunkSoftDeadline: TimeInterval = 2.5
+    /// Force flush if no silence found within this grace window.
+    private let chunkGracePeriod: TimeInterval = 0.3
 
     init(config: Config) {
         self.config = config
@@ -98,11 +106,24 @@ final class AudioRecorder {
             let rms = self.computeRMS(buffer: converted)
             let frames = Int(converted.frameLength)
 
-            // Time-based flush: emit chunk every 2 s regardless of silence
+            // Time-based flush with grace period: wait for a micro-silence between words
+            // to avoid cutting mid-syllable. Soft deadline at 2.5 s, hard limit at 2.8 s.
             let now = Date()
-            if self.currentChunkHasAudio && now.timeIntervalSince(self.lastFlushTime) >= 2.0 {
-                self.lastFlushTime = now
-                self.flushCurrentChunk()
+            let elapsed = now.timeIntervalSince(self.lastFlushTime)
+
+            if self.seekingSilence {
+                let graceElapsed = now.timeIntervalSince(self.seekingSilenceStart)
+                if rms < self.microSilenceRMS || graceElapsed >= self.chunkGracePeriod {
+                    self.seekingSilence = false
+                    self.flushCurrentChunk()
+                }
+            } else if self.currentChunkHasAudio && elapsed >= self.chunkSoftDeadline {
+                if rms < self.microSilenceRMS {
+                    self.flushCurrentChunk()
+                } else {
+                    self.seekingSilence = true
+                    self.seekingSilenceStart = now
+                }
             }
 
             if rms < self.silenceThresholdRMS {
@@ -170,6 +191,7 @@ final class AudioRecorder {
         chunkURL = nil
         currentChunkHasAudio = false
         chunkSilentFrames = 0
+        seekingSilence = false
         lastFlushTime = Date()
 
         let flushedURL = url

@@ -6,6 +6,11 @@ final class Transcriber {
     private var ctx: OpaquePointer?
     private let config: Config
 
+    /// Text from the last transcription, passed as initial_prompt for the next chunk
+    /// so Whisper has continuity context across chunk boundaries.
+    /// Only accessed from the serial transcriptionQueue.
+    private var lastTranscription: String = ""
+
     init(config: Config) throws {
         self.config = config
 
@@ -25,6 +30,11 @@ final class Transcriber {
 
     deinit {
         if let ctx = ctx { whisper_free(ctx) }
+    }
+
+    /// Clear accumulated context. Call at the start of each dictation session.
+    func resetContext() {
+        lastTranscription = ""
     }
 
     // ── Segment callback box ──────────────────────────────────────────────────
@@ -56,6 +66,8 @@ final class Transcriber {
         params.print_special = false
         params.single_segment = false
         params.no_timestamps = true
+        params.suppress_blank = true
+        params.suppress_nst = true
 
         if config.threads > 0 {
             params.n_threads = Int32(config.threads)
@@ -81,19 +93,16 @@ final class Transcriber {
             params.new_segment_callback_user_data = Unmanaged.passUnretained(b).toOpaque()
         }
 
-        // Run inference
-        let result: Int32
-        if config.language != "auto" {
-            result = config.language.withCString { langPtr in
-                params.language = langPtr
-                return samples.withUnsafeBufferPointer { ptr in
-                    whisper_full(ctx, params, ptr.baseAddress, Int32(samples.count))
-                }
+        // Run inference. Nest withCString closures so both the initial_prompt and
+        // language C strings stay alive through whisper_full().
+        let prompt = lastTranscription
+        let lang = config.language == "auto" ? "auto" : config.language
+
+        let result: Int32 = prompt.withCString { promptPtr in
+            if !prompt.isEmpty {
+                params.initial_prompt = promptPtr
             }
-        } else {
-            // Passing "auto" lets whisper detect language then continue to transcribe.
-            // (detect_language=true would stop after detection and return 0 segments.)
-            result = "auto".withCString { langPtr in
+            return lang.withCString { langPtr in
                 params.language = langPtr
                 return samples.withUnsafeBufferPointer { ptr in
                     whisper_full(ctx, params, ptr.baseAddress, Int32(samples.count))
@@ -106,18 +115,27 @@ final class Transcriber {
 
         guard result == 0 else { throw TranscriberError.transcriptionFailed(Int(result)) }
 
+        // Collect all segments (needed for context even in streaming mode).
+        let nSegments = whisper_full_n_segments(ctx)
+        var fullText = ""
+        for i in 0..<nSegments {
+            if let segText = whisper_full_get_segment_text(ctx, i) {
+                fullText += String(cString: segText)
+            }
+        }
+        let trimmed = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Store for initial_prompt on the next chunk (~400 chars ≈ ~100 tokens).
+        if trimmed.count > 400 {
+            lastTranscription = String(trimmed.suffix(400))
+        } else {
+            lastTranscription = trimmed
+        }
+
         // Streaming: all segments were already delivered via the callback.
         if onSegment != nil { return "" }
 
-        // Non-streaming: collect all segments into one string.
-        let nSegments = whisper_full_n_segments(ctx)
-        var text = ""
-        for i in 0..<nSegments {
-            if let segText = whisper_full_get_segment_text(ctx, i) {
-                text += String(cString: segText)
-            }
-        }
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed
     }
 
     // ── WAV loader ────────────────────────────────────────────────────────────

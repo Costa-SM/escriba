@@ -93,6 +93,14 @@ var transcriber: Transcriber?
 // Only ever touched on the main thread.
 var pendingChunks = 0
 
+// Whether this is the first chunk in the current session (for spacing).
+var isFirstChunk = true
+
+// LLM chunk-pair buffering: when LLM is enabled, accumulate 2 chunks of text
+// before running the LLM on the combined text.
+var llmChunkBuffer = ""
+var llmChunkCount = 0
+
 // Serial queue: ensures chunks are transcribed in the order they arrived
 // and that text is injected in the correct sequence.
 let transcriptionQueue = DispatchQueue(label: "com.escriba.transcription", qos: .userInitiated)
@@ -179,10 +187,35 @@ func handleChunk(url: URL) {
                 logInfo("Chunk produced empty result")
                 return
             }
-            text = textCleaner.cleanFast(text)
-            logInfo("Chunk: \(text.prefix(80))")
+            logInfo("Chunk raw: \(text.prefix(80))")
+
             DispatchQueue.main.async {
-                TextInjector.typeChunk(text)
+                if textCleaner.llmEnabled {
+                    // Buffer chunks in pairs for LLM cleanup.
+                    if !llmChunkBuffer.isEmpty { llmChunkBuffer += " " }
+                    llmChunkBuffer += text
+                    llmChunkCount += 1
+
+                    if llmChunkCount >= 2 {
+                        let combined = llmChunkBuffer
+                        llmChunkBuffer = ""
+                        llmChunkCount = 0
+                        transcriptionQueue.async {
+                            let cleaned = textCleaner.clean(combined)
+                            let output = isFirstChunk ? cleaned : " " + cleaned
+                            DispatchQueue.main.async {
+                                isFirstChunk = false
+                                TextInjector.typeChunk(output)
+                            }
+                        }
+                    }
+                } else {
+                    // Fast path: rule-based cleanup per chunk, paste immediately.
+                    let cleaned = textCleaner.cleanFast(text)
+                    let output = isFirstChunk ? cleaned : " " + cleaned
+                    isFirstChunk = false
+                    TextInjector.typeChunk(output)
+                }
             }
         } catch {
             logError("Chunk transcription error: \(error)")
@@ -215,6 +248,28 @@ func recordingEnded() {
 /// Tear down after the session is fully complete.
 func finishSession() {
     stopAnimation()
+
+    // Flush any remaining LLM-buffered chunk.
+    if textCleaner.llmEnabled && !llmChunkBuffer.isEmpty {
+        let remaining = llmChunkBuffer
+        llmChunkBuffer = ""
+        llmChunkCount = 0
+        transcriptionQueue.async {
+            let cleaned = textCleaner.clean(remaining)
+            let output = isFirstChunk ? cleaned : " " + cleaned
+            DispatchQueue.main.async {
+                isFirstChunk = false
+                TextInjector.typeChunk(output)
+                TextInjector.endStream()
+                playDoneSound()
+                state = .idle
+                setStatus("🎙")
+                logInfo("Session complete")
+            }
+        }
+        return
+    }
+
     TextInjector.endStream()
     playDoneSound()
     state = .idle
@@ -227,6 +282,10 @@ func finishSession() {
 func startRecording() {
     guard state == .idle else { return }
     state = .recording
+    isFirstChunk = true
+    llmChunkBuffer = ""
+    llmChunkCount = 0
+    transcriber?.resetContext()
     setStatus("🔴")
     playStartSound()
     logInfo("Recording started")
