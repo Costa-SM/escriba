@@ -65,10 +65,13 @@ final class Transcriber {
                 }
             }
         } else {
-            params.language = nil
-            params.detect_language = true
-            result = samples.withUnsafeBufferPointer { samplesPtr in
-                whisper_full(ctx, params, samplesPtr.baseAddress, Int32(samples.count))
+            // Pass "auto" — whisper detects language and then continues to transcribe.
+            // detect_language = true would stop after detection and return 0 segments.
+            result = "auto".withCString { langPtr in
+                params.language = langPtr
+                return samples.withUnsafeBufferPointer { samplesPtr in
+                    whisper_full(ctx, params, samplesPtr.baseAddress, Int32(samples.count))
+                }
             }
         }
 
